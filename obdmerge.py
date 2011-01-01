@@ -12,6 +12,9 @@
 # Trips will be given new numbers arbitrarily, someone might want to
 # figure out trip numbers based on timestamps, but I'm not doing that
 # yet.
+#
+# Adds an additional table called tripmap which maps trip ids back to
+# source data
 
 import getopt
 import sqlite3
@@ -20,8 +23,9 @@ import sys
 tripcount = 0
 currentdb = None
 oconn = None
+rowcount = 0
 
-# (olddb, oldtripid) -> newtripid
+# oldtripid -> newtripid
 tripmap = {}
 
 # All fields (except default ones), disambiguated
@@ -30,17 +34,20 @@ allfields = set()
 def usage():
   print "Usage: ... tbd"
 
-def verbose(text):
-  if (verbose):
-    print text
-
-def addToTripMap(currentdb, tripid, newTripId):
+def addToTripMap(oldTripId, newTripId):
   global tripmap
-  tripmap[(currentdb, tripid)] = newTripId
+  tripmap[oldTripId] = newTripId
 
-def getNewTripId(currentdb, tripid):
+def getNewTripId(oldTripId):
   global tripmap
-  return tripmap[(currentdb, tripid)]
+  return tripmap[oldTripId]
+
+def setNewDatabse(db):
+  global currentdb
+  global tripmap
+
+  currentdb = db;
+  tripmap = {}
 
 # Write methods
 #
@@ -59,9 +66,44 @@ def writeTrip(tripid, start, end):
     "insert into tripmap(tripid, sourcedb, sourcetripid) values(?, ?, ?)",
     (tripcount, currentdb, tripid))
 
-  addToTripMap(currentdb, tripid, tripcount)
+  addToTripMap(tripid, tripcount)
 
   oconn.commit()
+
+# Write information about a row to the output database. Translate the trip
+# id.
+def writeRow(row):
+  global oconn
+  global currentdb
+  global rowcount
+
+  # Add columns, could be done just the first time, optimize later.
+  for column in row.keys():
+    addObdColumn(column)
+
+  # I'm sure there's smarter python than this. Whatever.
+  # This just wraps they keys and values into two lists, keys and values
+  # match by index number.
+  keys=[]
+  values=[]
+  for key in row.keys():
+    keys.append(key)
+    val = row[key]
+    if (key == "trip"):
+      newTripId = getNewTripId(val)
+      val = newTripId
+    values.append(row[key])
+
+  params = ",".join(["?"] * len(row))
+  stmt = "insert into obd (%s) values (%s)" % (",".join(keys), params)
+
+  oconn.execute(stmt, values)
+
+  # Make 1000 a command-line option --commit_count?
+  rowcount = rowcount + 1
+  if rowcount % 1000 == 0:
+    print rowcount
+    oconn.commit()
 
 # Initialize the output database.
 def initializeMergeDb(db):
@@ -84,8 +126,6 @@ def initializeMergeDb(db):
   conn.execute("CREATE INDEX IDX_OBDTIME ON obd (time)")
   conn.execute("CREATE INDEX IDX_OBDTRIP ON obd (trip)")
 
-  # TODO(konigsberg): Add indices to obd
-
   return conn
 
 def addObdColumn(column):
@@ -100,24 +140,22 @@ def addObdColumn(column):
   if column in allfields:
     return
 
-  verbose("Adding columnn: %s" % column)
+  print "Adding columnn: %s" % column
 
   oconn.execute("ALTER TABLE obd ADD %s REAL" % column)
   allfields = allfields | set([column])
 
-# Initial pass at database scanning, reads all the database fields.
-def getFieldsFrom(conn):
+# Read and proecss the obd table
+def processObd(conn):
   global currentdb
   cur = conn.cursor()
   cur.execute('select * from obd')
-  row = cur.fetchone()
-  for column in row.keys():
-    addObdColumn(column)
-
+  for row in cur:
+    writeRow(row)
   cur.close()
 
-# Initialize the list of trips. This 
-def getTripsFrom(conn):
+# Read the trips table
+def processTrips(conn):
   global tripcount
   cur = conn.cursor()
   cur.execute('select * from trip')
@@ -125,28 +163,28 @@ def getTripsFrom(conn):
     writeTrip(row["tripid"], row["start"], row["end"])
   cur.close()
 
-def readDb(dbs):
-  global currentdb
-  for db in dbs:
-    currentdb = db
-    conn = sqlite3.connect(db)
-    conn.row_factory = sqlite3.Row
-    verbose("Reading metadata from %s" % db)
-    fields = getFieldsFrom(conn)
-    trips = getTripsFrom(conn)
-    conn.close()
+def processDatabase(db):
+  conn = sqlite3.connect(db)
+  conn.row_factory = sqlite3.Row
+  print "Reading from %s" % db
+  processTrips(conn)
+  processObd(conn)
+  conn.close()
 
 def main(argv):
   global oconn
-  global allfields
+  global rowcount
   try:
     output="merged.db"
-    opts, args = getopt.getopt(argv, "vo:", ["verbose", "output="])
+    opts, args = getopt.getopt(argv, "o:", ["output="])
     # Finish optarg processing http://www.faqs.org/docs/diveintopython/kgp_commandline.html
     oconn = initializeMergeDb(output)
-    readDb(args)
-
+    for db in args:
+      setNewDatabse(db)
+      processDatabase(db)
+      oconn.commit()
     oconn.close()
+    print "Finished processing %d rows" % rowcount
 
   except getopt.GetoptError:
     usage()
