@@ -15,8 +15,10 @@
 # Adds an additional table called tripmap which maps trip ids back to
 # source data
 
-# TODO: Store GPS and ECU data.
 
+# TODO: Store ECU data.
+
+#import datetime
 import getopt
 import sqlite3
 import sys
@@ -74,7 +76,9 @@ def writeTrip(row):
 
   addToTripMap(tripId, tripcount)
 
-  oconn.commit()
+  #start = row["start"]
+  #end = row["end"]
+  #print "%s %s" % (datetime.datetime.fromtimestamp(start), datetime.datetime.fromtimestamp(end)) 
 
 # Write information about an obd row to the output database. Translate the trip
 # id and ecu id
@@ -109,11 +113,9 @@ def writeObd(row):
 
   oconn.execute(stmt, values)
 
-  # Make 1000 a command-line option --commit_count?
   rowcount = rowcount + 1
-  if rowcount % 1000 == 0:
+  if rowcount % 10000 == 0:
     print rowcount
-    oconn.commit()
 
 def writeEcu(row):
   #row["ecuid"], row["vin"], row["ecu"], row["ecudesc"]
@@ -133,33 +135,28 @@ def writeGps():
   oconn.execute(stmt, row["lat"], row["lon"], row["alt"], row["speed"],
       row["course"], row["gpstime"], row["time"], newTripId)
 
-  # Make 1000 a command-line option --commit_count?
   rowcount = rowcount + 1
-  if rowcount % 1000 == 0:
+  if rowcount % 10000 == 0:
     print rowcount
-    oconn.commit()
 
 # Initialize the output database.
-def initializeOutputDb(conn):
-  conn.execute('''CREATE TABLE trip(
+def initializeOutputDb(oconn):
+  oconn.execute('''CREATE TABLE trip(
       tripid INTEGER PRIMARY KEY,
       start REAL,
       end REAL DEFAULT -1)''')
 
-  conn.execute('''CREATE TABLE tripmap(
+  oconn.execute('''CREATE TABLE tripmap(
       tripid INTEGER PRIMARY KEY,
       sourcedb TEXT,
       sourcetripid INTEGER)''')
       
-  conn.execute('''CREATE TABLE obd(
+  oconn.execute('''CREATE TABLE obd(
     time REAL,
     trip INTEGER,
     ecu INTEGER DEFAULT 0)''')
 
-  conn.execute("CREATE INDEX IDX_OBDTIME ON obd (time)")
-  conn.execute("CREATE INDEX IDX_OBDTRIP ON obd (trip)")
-
-  conn.execute('''CREATE TABLE gps(
+  oconn.execute('''CREATE TABLE gps(
     lat REAL,
     lon REAL,
     alt REAL,
@@ -168,23 +165,27 @@ def initializeOutputDb(conn):
     gpstime REAL,
     time REAL,
     trip INTEGER)''')
-  conn.execute("CREATE INDEX IDX_GPSTIME ON gps (time)")
-  conn.execute("CREATE INDEX IDX_GPSTRIP ON gps (trip)")
 
-  conn.execute('''CREATE TABLE ecu(
+  oconn.execute('''CREATE TABLE ecu(
     ecuid INTEGER PRIMARY KEY,
     vin TEXT,
     ecu INTEGER,
     ecudesc TEXT)''')
 
-  conn.execute("CREATE UNIQUE INDEX IDX_VINECU ON ecu (vin,ecu)")
-
-  conn.execute('''CREATE TABLE ecumap(
+  oconn.execute('''CREATE TABLE ecumap(
       ecuid INTEGER PRIMARY KEY,
       sourcedb TEXT,
       sourceecuid INTEGER)''')
 
-  return conn
+def turnOffSynchronousMode(oconn):
+  oconn.execute("PRAGMA synchronous=off")
+  
+def writeIndexes(oconn):
+  oconn.execute("CREATE INDEX IDX_OBDTIME ON obd (time)")
+  oconn.execute("CREATE INDEX IDX_OBDTRIP ON obd (trip)")
+  oconn.execute("CREATE INDEX IDX_GPSTIME ON gps (time)")
+  oconn.execute("CREATE INDEX IDX_GPSTRIP ON gps (trip)")
+  oconn.execute("CREATE UNIQUE INDEX IDX_VINECU ON ecu (vin,ecu)")
 
 def addObdColumn(column):
   global allfields
@@ -248,16 +249,23 @@ def main(argv):
   global rowcount
   try:
     output="merged.db"
-    opts, args = getopt.getopt(argv, "o:", ["output="])
+    # TODO(konigsberg): Implement -f for faking output.
+    opts, args = getopt.getopt(argv, "o:f", ["output=", "fake"])
     # Finish optarg processing http://www.faqs.org/docs/diveintopython/kgp_commandline.html
     oconn = sqlite3.connect(output)
     initializeOutputDb(oconn)
+    turnOffSynchronousMode(oconn)
+    oconn.commit()
+
     for db in args:
       setNewDatabse(db)
       processDatabase(db)
       oconn.commit()
+    print "Wrote %d rows" % rowcount
+    print "Writing indexes (which takes a while)..."
+    writeIndexes(oconn)
+    oconn.commit()
     oconn.close()
-    print "Finished processing %d rows" % rowcount
 
   except getopt.GetoptError:
     usage()
