@@ -35,7 +35,10 @@ tripmap = {}
 ecumap = {}
 
 # All fields deduped. Initialized with the default fields.
-allfields = set(["time", "trip", "ecu"])
+obdfields = set(["time", "trip", "ecu"])
+# All fields deduped. Initialized with the default fields.
+gpsfields = set([
+    "trip", "lat", "lon", "alt", "speed", "course", "gpstime", "time"])
 
 def usage():
   print "Usage: ... tbd"
@@ -80,16 +83,10 @@ def writeTrip(row):
   #end = row["end"]
   #print "%s %s" % (datetime.datetime.fromtimestamp(start), datetime.datetime.fromtimestamp(end)) 
 
-# Write information about an obd row to the output database. Translate the trip
-# id and ecu id
-def writeObd(row):
+def dynamicColumnInsert(row, tableName):
   global oconn
   global currentdb
   global rowcount
-
-  # Add columns, could be done just the first time, optimize later.
-  for column in row.keys():
-    addObdColumn(column)
 
   # I'm sure there's smarter python than this. Whatever.
   # This just wraps they keys and values into two lists, keys and values
@@ -109,7 +106,7 @@ def writeObd(row):
     values.append(row[key])
 
   params = ",".join(["?"] * len(row))
-  stmt = "insert into obd (%s) values (%s)" % (",".join(keys), params)
+  stmt = "insert into %s (%s) values (%s)" % (tableName, ",".join(keys), params)
 
   oconn.execute(stmt, values)
 
@@ -117,27 +114,27 @@ def writeObd(row):
   if rowcount % 10000 == 0:
     print rowcount
 
+# Write information about an obd row to the output database. Translate the trip
+# id and ecu id
+def writeObd(row):
+  # Add columns, could be done just the first time, optimize later.
+  for column in row.keys():
+    addObdColumn(column)
+
+  dynamicColumnInsert(row, "obd")
+
 def writeEcu(row):
   #row["ecuid"], row["vin"], row["ecu"], row["ecudesc"]
   pass
 
 # Write information about a row to the output database. Translate the trip
 # id.
-def writeGps():
-  global oconn
-  global currentdb
-  global rowcount
+def writeGps(row):
+  # Add columns, could be done just the first time, optimize later.
+  for column in row.keys():
+    addGpsColumn(column)
 
-  newTripId = getNewTripId(val)
-
-  stmt = "insert into gps (lat, lon, alt, speed, course, gpstime, time, trip) values (?,?,?,?,?,?,?,?)"
-
-  oconn.execute(stmt, row["lat"], row["lon"], row["alt"], row["speed"],
-      row["course"], row["gpstime"], row["time"], newTripId)
-
-  rowcount = rowcount + 1
-  if rowcount % 10000 == 0:
-    print rowcount
+  dynamicColumnInsert(row, "gps")
 
 # Initialize the output database.
 def initializeOutputDb(oconn):
@@ -157,14 +154,14 @@ def initializeOutputDb(oconn):
     ecu INTEGER DEFAULT 0)''')
 
   oconn.execute('''CREATE TABLE gps(
+    trip INTEGER,
     lat REAL,
     lon REAL,
     alt REAL,
     speed REAL,
     course REAL,
     gpstime REAL,
-    time REAL,
-    trip INTEGER)''')
+    time REAL)''')
 
   oconn.execute('''CREATE TABLE ecu(
     ecuid INTEGER PRIMARY KEY,
@@ -188,17 +185,39 @@ def writeIndexes(oconn):
   oconn.execute("CREATE UNIQUE INDEX IDX_VINECU ON ecu (vin,ecu)")
 
 def addObdColumn(column):
-  global allfields
+  global obdfields
   global oconn
 
   # Ignore default columns and fields already added.
-  if column in allfields:
+  if column in obdfields:
     return
 
-  print "Adding columnn: %s" % column
+  print "Adding columnn: %s to obd" % column
 
   oconn.execute("ALTER TABLE obd ADD %s REAL" % column)
-  allfields = allfields | set([column])
+  obdfields = obdfields | set([column])
+
+def addGpsColumn(column):
+  global gpsfields
+  global oconn
+
+  # Ignore default columns and fields already added.
+  if column in gpsfields:
+    return
+
+  print "Adding columnn: %s to gps" % column
+
+  oconn.execute("ALTER TABLE gps ADD %s REAL" % column)
+  gpsfields = gpsfields | set([column])
+
+# returns true if the supplied table name exists in the connection
+def tableExists(conn, name):
+  cur = conn.cursor();
+  cur.execute(
+      "select 1 from sqlite_master where name = '%s' and type='table'" % name)
+  found = cur.fetchone()
+  cur.close()
+  return found
 
 # Read the trips table
 def processTrips(conn):
@@ -210,6 +229,11 @@ def processTrips(conn):
 
 # Read the ECU table
 def processEcu(conn):
+  # The ecu table didn't exist in earlier databases,
+  # so do nothing if it doesn't exist.
+  if not tableExists(conn, "ecu"):
+    print "ecu table does not exist"
+    return
   cur = conn.cursor()
   cur.execute('select * from ecu')
   for row in cur:
